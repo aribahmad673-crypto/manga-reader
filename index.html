@@ -326,8 +326,22 @@ function attachInfiniteScroll(seriesName){
   };
 
   // Tap the page to toggle the header manually too.
-  readerContentEl.onclick = () => headerEl.classList.toggle("hidden");
-}
+  // Tap controls
+readerContentEl.addEventListener("click", (e) => {
+
+    // Top 15% of the screen toggles the header
+    if (e.clientY <= window.innerHeight * 0.15) {
+        headerEl.classList.toggle("hidden");
+        return;
+    }
+
+    // Anywhere else scrolls UP
+    readerScrollEl.scrollBy({
+        top: -readerScrollEl.clientHeight * 0.9,
+        behavior: "smooth"
+    });
+
+});
 
 let saveTimer = null;
 function throttledSave(seriesName){
