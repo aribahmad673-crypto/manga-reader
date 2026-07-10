@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Manga Reader</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#14161f">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  :root{
+    --bg:#14161f;
+    --bg-raised:#1d2029;
+    --accent:#e8763c;
+    --text:#eceef2;
+    --text-dim:#8b8fa3;
+    --line:#2a2e3a;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
+    font-family:-apple-system,Roboto,"Segoe UI",sans-serif;overflow:hidden;}
+  #app{height:100vh;height:100dvh;display:flex;flex-direction:column;}
+
+  header{display:flex;align-items:center;gap:12px;padding:14px 16px;
+    padding-top:calc(14px + env(safe-area-inset-top));
+    border-bottom:1px solid var(--line);flex:0 0 auto;background:var(--bg);z-index:5;}
+  header h1{font-size:17px;margin:0;font-weight:600;flex:1;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;}
+  .backbtn{background:none;border:none;color:var(--text);font-size:22px;padding:4px 8px;
+    cursor:pointer;line-height:1;}
+  .iconbtn{background:none;border:none;color:var(--text-dim);font-size:20px;
+    padding:4px 8px;cursor:pointer;}
+
+  main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;}
+
+  .view{display:none;height:100%;}
+  .view.active{display:block;}
+
+  /* ---- Library ---- */
+  .empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;
+    height:100%;text-align:center;padding:32px;gap:16px;}
+  .empty-state p{color:var(--text-dim);font-size:14px;max-width:280px;line-height:1.5;margin:0;}
+  .primary-btn{background:var(--accent);color:#14161f;border:none;border-radius:10px;
+    padding:14px 22px;font-size:15px;font-weight:600;cursor:pointer;}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;padding:16px;}
+  .card{background:var(--bg-raised);border-radius:12px;padding:14px;cursor:pointer;
+    border:1px solid var(--line);}
+  .card .name{font-size:14px;font-weight:600;line-height:1.3;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+  .card .sub{font-size:12px;color:var(--accent);margin-top:8px;}
+  .card .count{font-size:12px;color:var(--text-dim);margin-top:2px;}
+
+  /* ---- Series ---- */
+  .chapter-row{display:flex;align-items:center;justify-content:space-between;
+    padding:16px;border-bottom:1px solid var(--line);cursor:pointer;}
+  .chapter-row .cname{font-size:14px;}
+  .chapter-row .meta{font-size:12px;color:var(--text-dim);}
+  .chapter-row.current .cname{color:var(--accent);font-weight:600;}
+
+  /* ---- Reader ---- */
+  #reader-scroll{background:#0b0c11;}
+  .page-canvas{display:block;width:100%;height:auto;margin:0 auto;}
+  .chapter-marker{text-align:center;color:var(--text-dim);font-size:12px;
+    padding:18px 0;background:#0b0c11;}
+  #reader-status{position:fixed;top:0;left:0;right:0;height:3px;background:var(--accent);
+    transform:scaleX(0);transform-origin:left;z-index:20;}
+  .loading{display:flex;align-items:center;justify-content:center;height:100%;
+    color:var(--text-dim);font-size:14px;}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <button class="backbtn" id="backBtn" style="visibility:hidden;">‹</button>
+    <h1 id="headerTitle">Manga Reader</h1>
+    <button class="iconbtn" id="rescanBtn" title="Change folder" style="display:none;">⟳</button>
+  </header>
+  <main>
+    <div id="view-library" class="view active"></div>
+    <div id="view-series" class="view"></div>
+    <div id="view-reader" class="view"><div id="reader-scroll"></div></div>
+  </main>
+</div>
+<div id="reader-status"></div>
+
+<input type="file" id="folderInput" webkitdirectory directory multiple style="display:none;">
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+// ---------- State ----------
+const state = {
+  series: {},          // seriesName -> [{file, name, chapterNum}]
+  currentSeries: null,
+  currentChapterIdx: 0,
+  view: "library"
+};
+
+const PROGRESS_KEY = "manga-reader-progress";
+function loadProgress(){
+  try { return JSON.parse(localStorage.getItem(PROGRESS_KEY)) || {}; }
+  catch(e){ return {}; }
+}
+function saveProgress(seriesName, chapterIdx, scrollRatio){
+  const p = loadProgress();
+  p[seriesName] = { chapterIdx, scrollRatio, ts: Date.now() };
+  localStorage.setItem(PROGRESS_KEY, JSON.stringify(p));
+}
+
+// ---------- Chapter number extraction ----------
+function extractChapterNum(filename){
+  const brackets = [...filename.matchAll(/\[(\d{1,5})\]/g)].map(m => parseInt(m[1],10));
+  if (brackets.length) return brackets[brackets.length - 1];
+  const nums = [...filename.matchAll(/(\d{1,5})/g)].map(m => parseInt(m[1],10));
+  if (nums.length) return nums[nums.length - 1];
+  return 0;
+}
+
+// ---------- Folder selection ----------
+const folderInput = document.getElementById("folderInput");
+document.getElementById("rescanBtn").addEventListener("click", () => folderInput.click());
+
+folderInput.addEventListener("change", (e) => {
+  const files = [...e.target.files].filter(f => f.name.toLowerCase().endsWith(".pdf"));
+  if (!files.length){
+    alert("No PDF files found in that folder.");
+    return;
+  }
+  const series = {};
+  files.forEach(file => {
+    const parts = file.webkitRelativePath.split("/");
+    // parts[0] = selected root folder, parts[1] = series subfolder (if nested)
+    const seriesName = parts.length >= 3 ? parts[1] : parts[0];
+    if (!series[seriesName]) series[seriesName] = [];
+    series[seriesName].push({
+      file,
+      name: file.name,
+      chapterNum: extractChapterNum(file.name)
+    });
+  });
+  Object.values(series).forEach(list => list.sort((a,b) => a.chapterNum - b.chapterNum));
+  state.series = series;
+  document.getElementById("rescanBtn").style.display = "inline-block";
+  renderLibrary();
+});
+
+// ---------- Navigation ----------
+function setView(name){
+  document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+  document.getElementById("view-" + name).classList.add("active");
+  state.view = name;
+  document.getElementById("backBtn").style.visibility = name === "library" ? "hidden" : "visible";
+}
+
+document.getElementById("backBtn").addEventListener("click", () => {
+  if (state.view === "reader"){
+    saveCurrentReaderProgress();
+    renderSeries(state.currentSeries);
+    setView("series");
+  } else if (state.view === "series"){
+    renderLibrary();
+    setView("library");
+  }
+});
+
+// ---------- Library view ----------
+function renderLibrary(){
+  document.getElementById("headerTitle").textContent = "Manga Reader";
+  const el = document.getElementById("view-library");
+  const names = Object.keys(state.series);
+  if (!names.length){
+    el.innerHTML = `
+      <div class="empty-state">
+        <p>Select your <b>Manga</b> folder to load your library. Each subfolder is treated as a series.</p>
+        <button class="primary-btn" id="pickFolderBtn">Select Manga folder</button>
+      </div>`;
+    document.getElementById("pickFolderBtn").addEventListener("click", () => folderInput.click());
+    return;
+  }
+  const progress = loadProgress();
+  el.innerHTML = `<div class="grid">${
+    names.map(name => {
+      const p = progress[name];
+      const chapters = state.series[name];
+      const sub = p ? `Continue: Ch. ${chapters[p.chapterIdx]?.chapterNum ?? "?"}` : "Start reading";
+      return `<div class="card" data-series="${escapeAttr(name)}">
+        <div class="name">${escapeHtml(name)}</div>
+        <div class="sub">${sub}</div>
+        <div class="count">${chapters.length} chapters</div>
+      </div>`;
+    }).join("")
+  }</div>`;
+  el.querySelectorAll(".card").forEach(card => {
+    card.addEventListener("click", () => {
+      renderSeries(card.dataset.series);
+      setView("series");
+    });
+  });
+}
+
+// ---------- Series view ----------
+function renderSeries(seriesName){
+  state.currentSeries = seriesName;
+  document.getElementById("headerTitle").textContent = seriesName;
+  const chapters = state.series[seriesName];
+  const progress = loadProgress();
+  const lastIdx = progress[seriesName]?.chapterIdx;
+  const el = document.getElementById("view-series");
+  el.innerHTML = chapters.map((ch, i) => `
+    <div class="chapter-row ${i === lastIdx ? "current" : ""}" data-idx="${i}">
+      <div class="cname">Chapter ${ch.chapterNum}</div>
+      <div class="meta">${i === lastIdx ? "Continue" : ""}</div>
+    </div>
+  `).join("");
+  el.querySelectorAll(".chapter-row").forEach(row => {
+    row.addEventListener("click", () => {
+      openReader(seriesName, parseInt(row.dataset.idx, 10));
+    });
+  });
+}
+
+// ---------- Reader view ----------
+let readerScrollEl, currentLoadedChapters = [], loadingNext = false;
+
+async function openReader(seriesName, chapterIdx){
+  state.currentSeries = seriesName;
+  state.currentChapterIdx = chapterIdx;
+  currentLoadedChapters = [chapterIdx];
+  document.getElementById("headerTitle").textContent =
+    `${seriesName} · Ch. ${state.series[seriesName][chapterIdx].chapterNum}`;
+  readerScrollEl = document.getElementById("reader-scroll");
+  readerScrollEl.innerHTML = `<div class="loading">Loading chapter…</div>`;
+  setView("reader");
+
+  await renderChapterInto(seriesName, chapterIdx, readerScrollEl, true);
+
+  const progress = loadProgress();
+  const saved = progress[seriesName];
+  if (saved && saved.chapterIdx === chapterIdx && saved.scrollRatio){
+    requestAnimationFrame(() => {
+      readerScrollEl.scrollTop = saved.scrollRatio * readerScrollEl.scrollHeight;
+    });
+  }
+
+  attachInfiniteScroll(seriesName);
+}
+
+async function renderChapterInto(seriesName, chapterIdx, container, clear){
+  const chapters = state.series[seriesName];
+  const chInfo = chapters[chapterIdx];
+  if (!chInfo) return;
+  const arrayBuffer = await chInfo.file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+  if (clear) container.innerHTML = "";
+  const marker = document.createElement("div");
+  marker.className = "chapter-marker";
+  marker.dataset.chapterIdx = chapterIdx;
+  marker.textContent = `— Chapter ${chInfo.chapterNum} —`;
+  container.appendChild(marker);
+
+  for (let p = 1; p <= pdf.numPages; p++){
+    const page = await pdf.getPage(p);
+    const viewport = page.getViewport({ scale: 1.5 });
+    const canvas = document.createElement("canvas");
+    canvas.className = "page-canvas";
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d");
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    container.appendChild(canvas);
+  }
+}
+
+function attachInfiniteScroll(seriesName){
+  readerScrollEl.onscroll = () => {
+    const el = readerScrollEl;
+    const nearBottom = el.scrollTop + el.clientHeight > el.scrollHeight - 600;
+    if (nearBottom) maybeLoadNextChapter(seriesName);
+
+    // update "current chapter" based on which marker is closest to top
+    const markers = [...el.querySelectorAll(".chapter-marker")];
+    let activeIdx = currentLoadedChapters[0];
+    for (const m of markers){
+      if (m.offsetTop <= el.scrollTop + 40) activeIdx = parseInt(m.dataset.chapterIdx, 10);
+    }
+    state.currentChapterIdx = activeIdx;
+    const ch = state.series[seriesName][activeIdx];
+    if (ch) document.getElementById("headerTitle").textContent =
+      `${seriesName} · Ch. ${ch.chapterNum}`;
+
+    throttledSave(seriesName);
+  };
+}
+
+let saveTimer = null;
+function throttledSave(seriesName){
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveCurrentReaderProgress();
+  }, 800);
+}
+
+function saveCurrentReaderProgress(){
+  if (!readerScrollEl || !state.currentSeries) return;
+  const ratio = readerScrollEl.scrollTop / Math.max(1, readerScrollEl.scrollHeight);
+  saveProgress(state.currentSeries, state.currentChapterIdx, ratio);
+}
+
+async function maybeLoadNextChapter(seriesName){
+  if (loadingNext) return;
+  const lastLoaded = currentLoadedChapters[currentLoadedChapters.length - 1];
+  const nextIdx = lastLoaded + 1;
+  const chapters = state.series[seriesName];
+  if (nextIdx >= chapters.length) return;
+  loadingNext = true;
+  await renderChapterInto(seriesName, nextIdx, readerScrollEl, false);
+  currentLoadedChapters.push(nextIdx);
+  loadingNext = false;
+}
+
+// ---------- Utils ----------
+function escapeHtml(s){ return s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function escapeAttr(s){ return s.replace(/"/g, "&quot;"); }
+
+// ---------- Service worker (offline app shell) ----------
+if ("serviceWorker" in navigator){
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  });
+}
+
+renderLibrary();
+</script>
+</body>
+</html>
